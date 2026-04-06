@@ -1,95 +1,79 @@
-# mega_sniper.py
+import requests
 import time
 import json
-import requests
-from playwright.sync_api import sync_playwright
+import discord
+from discord import Webhook, RequestsWebhookAdapter
 
-# ---------------- CONFIG ----------------
-DISCORD_WEBHOOK = "YOUR_DISCORD_WEBHOOK"
-HEADLESS = True  # True for GitHub Actions, False for PC debugging
-SLEEP_INTERVAL = 60  # seconds between checks
+# === CONFIG ===
+DISCORD_WEBHOOK_URL = "YOUR_DISCORD_WEBHOOK_URL"
+ELDORADO_SEARCH_URL = "https://www.eldorado.gg/steam-accounts/a/42-0-0?pageSize=24&searchQuery=gorilla%20tag"
+SCRAPE_INTERVAL = 20  # seconds between checks
 
-# Eldorado / Gorilla Tag sources
-ELDORADO_URL = "https://www.eldorado.gg/steam-accounts/a/42-0-0?pageSize=24&searchQuery=gorilla%20tag"
-GORILLA_TAG_URL = "https://lzt.market/steam/gorilla-tag/?limit=yes&rt=nomatter&order_by=price_to_up"
+# === SETUP DISCORD ===
+webhook = Webhook.from_url(DISCORD_WEBHOOK_URL, adapter=RequestsWebhookAdapter())
 
-# Store seen listings to detect new/edited/deleted
-seen_listings = set()
-# ----------------------------------------
+# === TRACK LISTINGS ===
+eldorado_seen = {}  # {pid: price}
+steam_seen = {}     # {id: price}
 
-def send_discord(title, url, price, status="NEW"):
-    data = {
-        "content": f"@everyone",
-        "embeds": [{
-            "title": f"{status} - {title}",
-            "url": url,
-            "description": f"💰 Price: {price}",
-            "color": 16711680 if status=="REMOVED" else 65280
-        }]
-    }
-    requests.post(DISCORD_WEBHOOK, json=data)
+# === FUNCTIONS ===
 
 def fetch_eldorado_listings():
+    """Returns a list of (pid, title, price, url)"""
     try:
-        resp = requests.get(ELDORADO_URL, headers={"User-Agent": "Mozilla/5.0"})
-        listings = resp.json().get("data", [])
-        results = []
-        for l in listings:
-            pid = l["id"]
-            title = l["name"]
-            price = l.get("price", "Unknown")
-            url = f"https://www.eldorado.gg/steam-accounts/{pid}"
-            results.append((pid, title, price, url))
-        return results
+        r = requests.get(ELDORADO_SEARCH_URL, timeout=15)
+        r.raise_for_status()
+        data = r.json()
     except Exception as e:
-        print("Eldorado fetch error:", e)
+        print(f"Eldorado fetch error: {e}")
         return []
 
-def fetch_gorilla_tag():
+    listings = []
+    for item in data.get("items", []):
+        pid = str(item.get("id"))
+        title = item.get("title")
+        price = float(item.get("price", 0))
+        url = f"https://www.eldorado.gg/steam-accounts/{pid}"
+        listings.append((pid, title, price, url))
+    return listings
+
+def send_discord(title, url, price, status):
+    """Send message to Discord webhook"""
+    if status == "NEW":
+        emoji = "🔥"
+    elif status == "EDITED":
+        emoji = "✏️"
+    elif status == "REMOVED":
+        emoji = "❌"
+    else:
+        emoji = ""
+    message = f"{emoji} **{status}**\n💰 {price}\n🔗 {url}\n**{title}**\n@everyone"
     try:
-        resp = requests.get(GORILLA_TAG_URL, headers={"User-Agent": "Mozilla/5.0"})
-        listings = resp.json().get("items", [])
-        results = []
-        for l in listings:
-            pid = l["id"]
-            title = l["title"]
-            price = l.get("price", "Unknown")
-            url = f"https://lzt.market/steam/gorilla-tag/{pid}"
-            results.append((pid, title, price, url))
-        return results
+        webhook.send(message)
     except Exception as e:
-        print("Gorilla Tag fetch error:", e)
-        return []
+        print(f"Discord send error: {e}")
 
-# ---------------- MAIN LOOP ----------------
-with sync_playwright() as p:
-    browser = p.chromium.launch(headless=HEADLESS, args=["--no-sandbox", "--disable-dev-shm-usage"])
-    context = browser.new_context()
-    page = context.new_page()
+# === MAIN LOOP ===
+while True:
+    # --- Eldorado ---
+    listings = fetch_eldorado_listings()
+    current_pids = set()
 
-    while True:
-        try:
-            # Eldorado
-            for pid, title, price, url in fetch_eldorado_listings():
-                if pid not in seen_listings:
-                    send_discord(title, url, price, "NEW")
-                    seen_listings.add(pid)
+    for pid, title, price, url in listings:
+        current_pids.add(pid)
+        old_price = eldorado_seen.get(pid)
+        if old_price is None:
+            send_discord(title, url, price, "NEW")
+            eldorado_seen[pid] = price
+        elif old_price != price:
+            send_discord(title, url, price, "EDITED")
+            eldorado_seen[pid] = price
 
-            # Detect removed listings
-            for old_pid in list(seen_listings):
-                current_pids = {pid for pid, _, _, _ in fetch_eldorado_listings()}
-                if old_pid not in current_pids:
-                    send_discord(f"Listing {old_pid}", "", "", "REMOVED")
-                    seen_listings.remove(old_pid)
+    # Detect removed listings
+    for old_pid in list(eldorado_seen.keys()):
+        if old_pid not in current_pids:
+            send_discord(f"Listing {old_pid}", "", "", "REMOVED")
+            del eldorado_seen[old_pid]
 
-            # Gorilla Tag
-            for pid, title, price, url in fetch_gorilla_tag():
-                if pid not in seen_listings:
-                    send_discord(title, url, price, "NEW")
-                    seen_listings.add(pid)
-
-            time.sleep(SLEEP_INTERVAL)
-
-        except Exception as e:
-            print("Main loop error:", e)
-            time.sleep(30)
+    # --- Wait before next check ---
+    time.sleep(SCRAPE_INTERVAL)

@@ -1,83 +1,164 @@
-import discord
-from discord.ext import tasks
+from playwright.sync_api import sync_playwright
 import requests
 import time
-from playwright.sync_api import sync_playwright
+import json
+import os
 
-# -------- CONFIG --------
-DISCORD_TOKEN = "YOUR_DISCORD_BOT_TOKEN"
-DISCORD_CHANNEL_ID = 123456789012345678  # your channel ID
-ELDORADO_URL = "https://www.eldorado.gg/steam-accounts/a/42-0-0?pageSize=24&searchQuery=gorilla%20tag"
-GORILLA_TAG_URL = "https://lzt.market/steam/gorilla-tag/?limit=yes&rt=nomatter&order_by=price_to_up"
-CHECK_INTERVAL = 60  # seconds between checks
+# 🔗 PUT YOUR WEBHOOK HERE OR USE GITHUB SECRET
+WEBHOOK_URL = os.getenv("WEBHOOK_URL") or "YOUR_WEBHOOK_HERE"
 
-# -------- DISCORD SETUP --------
-intents = discord.Intents.default()
-intents.message_content = True
-client = discord.Client(intents=intents)
-last_eldorado_ids = set()
-last_gorilla_ids = set()
+LZT_URL = "https://lzt.market/steam/gorilla-tag/?limit=yes&rt=nomatter&order_by=price_to_up"
+ELDO_URL = "https://www.eldorado.gg/steam-accounts/a/42-0-0?pageSize=24&searchQuery=gorilla%20tag"
 
-def fetch_eldorado():
-    response = requests.get(ELDORADO_URL)
-    data = response.json()  # assuming Eldorado returns JSON
-    new_offers = []
-    removed_offers = []
+# =========================
+# LOAD DATA
+# =========================
+try:
+    with open("data.json", "r") as f:
+        data = json.load(f)
+        listings = data.get("listings", {})
+except:
+    listings = {}
 
-    global last_eldorado_ids
-    current_ids = set(item["id"] for item in data["offers"])
-    
-    # new offers
-    for item in data["offers"]:
-        if item["id"] not in last_eldorado_ids:
-            new_offers.append(item)
+def save():
+    with open("data.json", "w") as f:
+        json.dump({"listings": listings}, f)
 
-    # removed offers
-    for old_id in last_eldorado_ids:
-        if old_id not in current_ids:
-            removed_offers.append(old_id)
+# =========================
+# DISCORD WEBHOOK
+# =========================
+def send(event, title, price, link, ping=False):
+    data = {
+        "content": "@everyone" if ping else "",
+        "embeds": [
+            {
+                "title": title,
+                "description": f"{event}\n💰 ${price}\n🔗 {link}",
+                "color": 16711680
+            }
+        ]
+    }
 
-    last_eldorado_ids = current_ids
-    return new_offers, removed_offers
+    try:
+        requests.post(WEBHOOK_URL, json=data)
+    except:
+        print("Webhook failed")
 
-def fetch_gorilla_tag():
-    response = requests.get(GORILLA_TAG_URL)
-    data = response.json()
-    new_offers = []
+# =========================
+# MAIN BOT
+# =========================
+with sync_playwright() as p:
+    browser = p.chromium.launch(
+        headless=True,  # ✅ REQUIRED FOR GITHUB
+        args=["--no-sandbox", "--disable-dev-shm-usage"]
+    )
 
-    global last_gorilla_ids
-    current_ids = set(item["id"] for item in data["offers"])
-    
-    for item in data["offers"]:
-        if item["id"] not in last_gorilla_ids:
-            new_offers.append(item)
+    page = browser.new_page()
 
-    last_gorilla_ids = current_ids
-    return new_offers
+    print("🔥 SNIPER STARTED")
 
-@tasks.loop(seconds=CHECK_INTERVAL)
-async def check_offers():
-    channel = client.get_channel(DISCORD_CHANNEL_ID)
-    if not channel:
-        print("Channel not found")
-        return
+    while True:
+        try:
+            # =====================
+            # 🟢 LZT (GORILLA TAG)
+            # =====================
+            page.goto(LZT_URL)
+            page.wait_for_selector('[id^="marketItem--"]')
 
-    # Eldorado
-    new_eldorado, removed_eldorado = fetch_eldorado()
-    for offer in new_eldorado:
-        await channel.send(f"🔥 NEW ELDORADO LISTING\n💰 {offer['price']}\n🔗 {offer['link']} @everyone")
-    for offer_id in removed_eldorado:
-        await channel.send(f"❌ ELDORADO LISTING REMOVED\nID: {offer_id} @everyone")
+            items = page.query_selector_all('[id^="marketItem--"]')
 
-    # Gorilla Tag
-    new_gorilla = fetch_gorilla_tag()
-    for offer in new_gorilla:
-        await channel.send(f"🐒 NEW GORILLA TAG ACCOUNT\n💰 {offer['price']}\n🔗 {offer['link']} @everyone")
+            for item in items:
+                try:
+                    item_id = item.get_attribute("id").replace("marketItem--", "")
 
-# -------- RUN BOT --------
-@client.event
-async def on_ready():
-    print(f"Logged in as {client.user}")
-    check_offers.start()
+                    title = item.inner_text().split("\n")[0].strip()
 
-client.run(DISCORD_TOKEN)
+                    price_el = item.query_selector(".price")
+                    if not price_el:
+                        continue
+
+                    price = float(price_el.inner_text().replace("$", "").strip())
+                    link = f"https://lzt.market/{item_id}"
+
+                    old = listings.get(item_id)
+
+                    # 🆕 NEW
+                    if not old:
+                        listings[item_id] = price
+                        save()
+                        send("🟢 NEW LZT LISTING", title, price, link, ping=False)
+
+                    # 🔥 PRICE CHANGE
+                    elif old != price:
+                        listings[item_id] = price
+                        save()
+                        send("🔥 LZT PRICE CHANGED", title, price, link, ping=True)
+
+                except:
+                    continue
+
+            # =====================
+            # 🔴 ELDORADO
+            # =====================
+            page.goto(ELDO_URL)
+            page.wait_for_timeout(5000)
+
+            cards = page.query_selector_all('a[href*="steam-accounts"]')
+
+            current_ids = set()
+
+            for card in cards:
+                try:
+                    link = card.get_attribute("href")
+                    if not link:
+                        continue
+
+                    link = "https://www.eldorado.gg" + link
+                    item_id = link
+                    current_ids.add(item_id)
+
+                    text = card.inner_text().replace("\n", " ").strip()
+
+                    if "$" not in text:
+                        continue
+
+                    price_text = text.split("$")[1].split(" ")[0]
+                    price = float(price_text)
+
+                    title = text.split("$")[0][:60].strip()
+
+                    old = listings.get(item_id)
+
+                    # 🆕 NEW
+                    if not old:
+                        listings[item_id] = price
+                        save()
+                        send("🔥 NEW ELDORADO LISTING", title, price, link, ping=True)
+
+                    # 🔥 PRICE CHANGE / EDIT
+                    elif old != price:
+                        listings[item_id] = price
+                        save()
+                        send("🔥 ELDORADO PRICE CHANGED", title, price, link, ping=True)
+
+                except:
+                    continue
+
+            # ❌ REMOVED (ELDORADO ONLY)
+            removed = set(listings.keys()) - current_ids
+
+            for item_id in list(removed):
+                if "eldorado.gg" in item_id:
+                    old_price = listings.get(item_id, "Unknown")
+
+                    send("❌ LISTING REMOVED", "Eldorado Listing Removed", old_price, item_id, ping=True)
+
+                    del listings[item_id]
+                    save()
+
+            print("✅ cycle done")
+            time.sleep(15)
+
+        except Exception as e:
+            print("ERROR:", e)
+            time.sleep(5)

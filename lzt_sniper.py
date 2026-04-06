@@ -1,124 +1,121 @@
 from playwright.sync_api import sync_playwright
 import requests
 import time
-import os
 import json
+import os
 
-WEBHOOK_URL = os.getenv("WEBHOOK_URL") or "YOUR_WEBHOOK_HERE"
+WEBHOOK_URL = os.getenv("WEBHOOK_URL") or "YOUR_WEBHOOK"
 
-URL = "https://lzt.market/steam/gorilla-tag/?limit=yes&rt=nomatter&order_by=price_to_up"
+LZT_URL = "https://lzt.market/steam/gorilla-tag/?limit=yes&rt=nomatter&order_by=price_to_up"
+ELDO_URL = "https://www.eldorado.gg/steam-accounts/a/42-0-0?pageSize=24&searchQuery=gorilla%20tag"
 
-# 🔁 load seen items
+# load saved data
 try:
-    with open("seen.json", "r") as f:
-        seen = set(json.load(f))
+    with open("data.json", "r") as f:
+        data = json.load(f)
+        seen = set(data.get("seen", []))
+        prices = data.get("prices", {})
 except:
     seen = set()
+    prices = {}
 
-def save_seen():
-    with open("seen.json", "w") as f:
-        json.dump(list(seen), f)
+def save():
+    with open("data.json", "w") as f:
+        json.dump({"seen": list(seen), "prices": prices}, f)
 
-def send_webhook(title, price, link):
+def send(msg, title=None, price=None, link=None, ping=False):
     data = {
-        "content": "",  # change to "@everyone" if you want
+        "content": "@everyone" if ping else "",
         "embeds": [
             {
-                "title": title,
-                "description": f"💰 ${price}\n🔗 {link}",
-                "color": 5814783
+                "title": title or msg,
+                "description": f"{msg}\n💰 {price}\n🔗 {link}",
+                "color": 16711680
             }
         ]
     }
-    try:
-        requests.post(WEBHOOK_URL, json=data)
-    except:
-        print("Webhook failed")
-
-def restart():
-    try:
-        token = os.getenv("GH_TOKEN")
-        repo = os.getenv("GITHUB_REPOSITORY")
-
-        if not token or not repo:
-            return
-
-        url = f"https://api.github.com/repos/{repo}/actions/workflows/bot.yml/dispatches"
-
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/vnd.github+json"
-        }
-
-        requests.post(url, headers=headers, json={"ref": "main"})
-        print("♻️ Restart triggered")
-
-    except Exception as e:
-        print("Restart error:", e)
-
+    requests.post(WEBHOOK_URL, json=data)
 
 with sync_playwright() as p:
-    browser = p.chromium.launch(headless=True)  # False if running on PC
+    browser = p.chromium.launch(headless=False)
     page = browser.new_page()
 
-    page.goto(URL)
-    print("🔥 Gorilla Tag sniper started...")
+    print("🔥 MEGA SNIPER STARTED")
 
-    # ⏱️ ~5 hours runtime
-    for _ in range(1800):
+    while True:
         try:
-            print("🔄 Refreshing...")
+            # =====================
+            # 🔴 ELDORADO CHECK
+            # =====================
+            page.goto(ELDO_URL)
+            page.wait_for_timeout(5000)
 
-            page.reload()
-            page.wait_for_selector('[id^="marketItem--"]', timeout=10000)
+            html = page.content()
 
-            items = page.query_selector_all('[id^="marketItem--"]')
-            print(f"📦 Found {len(items)} items")
+            current_ids = set()
 
-            for item in items:
+            blocks = html.split('href="/')
+
+            for block in blocks:
+                if "steam-accounts" not in block:
+                    continue
+
                 try:
-                    item_id = item.get_attribute("id")
-                    if not item_id:
+                    link_part = block.split('"')[0]
+                    link = "https://www.eldorado.gg/" + link_part
+
+                    item_id = link
+                    current_ids.add(item_id)
+
+                    title = block.split(">")[1][:60]
+
+                    if "$" not in block:
                         continue
 
-                    item_id = item_id.replace("marketItem--", "")
+                    price_text = block.split("$")[1].split("<")[0]
+                    price = float(price_text)
 
-                    if item_id in seen:
+                    # 🟢 NEW LISTING
+                    if item_id not in seen:
+                        seen.add(item_id)
+                        prices[item_id] = price
+                        save()
+
+                        send("🔥 NEW ELDORADO LISTING", title, price, link, ping=True)
+                        print("NEW:", title)
                         continue
 
-                    # 🏷️ title
-                    title = item.inner_text().strip().split("\n")[0]
+                    # 🔥 PRICE CHANGE
+                    old_price = prices.get(item_id)
 
-                    # 💰 price
-                    price_el = item.query_selector(".price")
-                    if not price_el:
-                        continue
+                    if old_price and price != old_price:
+                        prices[item_id] = price
+                        save()
 
-                    price = float(price_el.inner_text().replace("$", "").strip())
+                        send("🔥 PRICE CHANGED", title, price, link, ping=True)
+                        print("PRICE CHANGE:", title)
 
-                    # 🔥 FILTER (CHANGE THIS)
-                    if price > 5:
-                        continue
+                except:
+                    continue
 
-                    link = f"https://lzt.market/{item_id}"
+            # ❌ REMOVED LISTINGS
+            removed = set(prices.keys()) - current_ids
 
-                    seen.add(item_id)
-                    save_seen()
+            for item_id in removed:
+                old_price = prices.get(item_id, "Unknown")
 
-                    send_webhook(title, price, link)
+                send("❌ LISTING REMOVED", "Eldorado Listing Removed", old_price, item_id, ping=True)
+                print("REMOVED:", item_id)
 
-                    print(f"🔥 FOUND: {title} - ${price}")
+                # remove from tracking
+                prices.pop(item_id, None)
+                seen.discard(item_id)
 
-                except Exception as e:
-                    print("Item error:", e)
+            save()
 
+            print("✅ cycle done")
             time.sleep(10)
 
         except Exception as e:
-            print("Loop error:", e)
+            print("ERROR:", e)
             time.sleep(5)
-
-    browser.close()
-
-# 🔁 restart GitHub workflow
-restart()

@@ -4,37 +4,44 @@ import time
 import json
 import os
 
-# 🔗 PUT YOUR WEBHOOK HERE OR USE GITHUB SECRET
+# =========================
+# 🔗 CONFIG
+# =========================
 WEBHOOK_URL = os.getenv("WEBHOOK_URL") or "YOUR_WEBHOOK_HERE"
 
 LZT_URL = "https://lzt.market/steam/gorilla-tag/?limit=yes&rt=nomatter&order_by=price_to_up"
 ELDO_URL = "https://www.eldorado.gg/steam-accounts/a/42-0-0?pageSize=24&searchQuery=gorilla%20tag"
 
+CHECK_DELAY = 15  # seconds
+
 # =========================
-# LOAD DATA
+# 💾 SAVE / LOAD DATA
 # =========================
 try:
     with open("data.json", "r") as f:
-        data = json.load(f)
-        listings = data.get("listings", {})
+        listings = json.load(f)
 except:
     listings = {}
 
 def save():
     with open("data.json", "w") as f:
-        json.dump({"listings": listings}, f)
+        json.dump(listings, f)
 
 # =========================
-# DISCORD WEBHOOK
+# 📡 CLEAN WEBHOOK
 # =========================
-def send(event, title, price, link, ping=False):
+def send(title, price, link, event, ping=False):
     data = {
         "content": "@everyone" if ping else "",
         "embeds": [
             {
-                "title": title,
-                "description": f"{event}\n💰 ${price}\n🔗 {link}",
-                "color": 16711680
+                "title": title[:80],
+                "url": link,
+                "description": f"{event}\n💰 **${price}**",
+                "color": 0x3498db,  # 🔵 clean blue
+                "footer": {
+                    "text": "Gorilla Tag Sniper"
+                }
             }
         ]
     }
@@ -45,11 +52,11 @@ def send(event, title, price, link, ping=False):
         print("Webhook failed")
 
 # =========================
-# MAIN BOT
+# 🧠 BOT
 # =========================
 with sync_playwright() as p:
     browser = p.chromium.launch(
-        headless=True,  # ✅ REQUIRED FOR GITHUB
+        headless=True,  # ✅ required for GitHub
         args=["--no-sandbox", "--disable-dev-shm-usage"]
     )
 
@@ -59,9 +66,9 @@ with sync_playwright() as p:
 
     while True:
         try:
-            # =====================
-            # 🟢 LZT (GORILLA TAG)
-            # =====================
+            # =========================
+            # 🟢 LZT
+            # =========================
             page.goto(LZT_URL)
             page.wait_for_selector('[id^="marketItem--"]')
 
@@ -80,26 +87,27 @@ with sync_playwright() as p:
                     price = float(price_el.inner_text().replace("$", "").strip())
                     link = f"https://lzt.market/{item_id}"
 
-                    old = listings.get(item_id)
+                    key = f"lzt_{item_id}"
+                    old_price = listings.get(key)
 
                     # 🆕 NEW
-                    if not old:
-                        listings[item_id] = price
+                    if key not in listings:
+                        listings[key] = price
                         save()
-                        send("🟢 NEW LZT LISTING", title, price, link, ping=False)
+                        send(title, price, link, "🟢 New LZT Listing", ping=False)
 
                     # 🔥 PRICE CHANGE
-                    elif old != price:
-                        listings[item_id] = price
+                    elif old_price != price:
+                        listings[key] = price
                         save()
-                        send("🔥 LZT PRICE CHANGED", title, price, link, ping=True)
+                        send(title, price, link, "🔥 LZT Price Changed", ping=True)
 
                 except:
                     continue
 
-            # =====================
+            # =========================
             # 🔴 ELDORADO
-            # =====================
+            # =========================
             page.goto(ELDO_URL)
             page.wait_for_timeout(5000)
 
@@ -114,50 +122,47 @@ with sync_playwright() as p:
                         continue
 
                     link = "https://www.eldorado.gg" + link
-                    item_id = link
-                    current_ids.add(item_id)
+                    key = f"eldo_{link}"
+                    current_ids.add(key)
 
                     text = card.inner_text().replace("\n", " ").strip()
 
                     if "$" not in text:
                         continue
 
-                    price_text = text.split("$")[1].split(" ")[0]
-                    price = float(price_text)
-
+                    price = float(text.split("$")[1].split(" ")[0])
                     title = text.split("$")[0][:60].strip()
 
-                    old = listings.get(item_id)
+                    old_price = listings.get(key)
 
                     # 🆕 NEW
-                    if not old:
-                        listings[item_id] = price
+                    if key not in listings:
+                        listings[key] = price
                         save()
-                        send("🔥 NEW ELDORADO LISTING", title, price, link, ping=True)
+                        send(title, price, link, "🔥 New Eldorado Listing", ping=True)
 
-                    # 🔥 PRICE CHANGE / EDIT
-                    elif old != price:
-                        listings[item_id] = price
+                    # 🔥 PRICE CHANGE
+                    elif old_price != price:
+                        listings[key] = price
                         save()
-                        send("🔥 ELDORADO PRICE CHANGED", title, price, link, ping=True)
+                        send(title, price, link, "🔥 Price Updated", ping=True)
 
                 except:
                     continue
 
             # ❌ REMOVED (ELDORADO ONLY)
-            removed = set(listings.keys()) - current_ids
+            for key in list(listings.keys()):
+                if key.startswith("eldo_") and key not in current_ids:
+                    link = key.replace("eldo_", "")
+                    old_price = listings[key]
 
-            for item_id in list(removed):
-                if "eldorado.gg" in item_id:
-                    old_price = listings.get(item_id, "Unknown")
+                    send("Listing Removed", old_price, link, "❌ Eldorado Removed", ping=True)
 
-                    send("❌ LISTING REMOVED", "Eldorado Listing Removed", old_price, item_id, ping=True)
-
-                    del listings[item_id]
+                    del listings[key]
                     save()
 
-            print("✅ cycle done")
-            time.sleep(15)
+            print("✅ cycle complete")
+            time.sleep(CHECK_DELAY)
 
         except Exception as e:
             print("ERROR:", e)

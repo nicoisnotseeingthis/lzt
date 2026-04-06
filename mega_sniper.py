@@ -4,12 +4,14 @@ import time
 import json
 import os
 
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL") or "YOUR_WEBHOOK"
 
 LZT_URL = "https://lzt.market/steam/gorilla-tag/?limit=yes&rt=nomatter&order_by=price_to_up"
 ELDO_URL = "https://www.eldorado.gg/steam-accounts/a/42-0-0?pageSize=24&searchQuery=gorilla%20tag"
 
-# load saved data
+# =========================
+# LOAD DATA
+# =========================
 try:
     with open("data.json", "r") as f:
         data = json.load(f)
@@ -23,22 +25,29 @@ def save():
     with open("data.json", "w") as f:
         json.dump({"seen": list(seen), "prices": prices}, f)
 
-def send(msg, title=None, price=None, link=None, ping=False):
+# =========================
+# DISCORD
+# =========================
+def send(event, title, price, link, ping=False):
+    embed = {
+        "title": title,
+        "description": f"{event}\n💰 ${price}\n🔗 {link}",
+        "color": 16711680
+    }
+
     data = {
         "content": "@everyone" if ping else "",
-        "embeds": [
-            {
-                "title": title or msg,
-                "description": f"{msg}\n💰 {price}\n🔗 {link}",
-                "color": 16711680
-            }
-        ]
+        "embeds": [embed]
     }
+
     try:
         requests.post(WEBHOOK_URL, json=data)
     except:
         print("Webhook failed")
 
+# =========================
+# RESTART (GITHUB)
+# =========================
 def restart():
     try:
         token = os.getenv("GH_TOKEN")
@@ -60,18 +69,19 @@ def restart():
     except Exception as e:
         print("Restart error:", e)
 
-
+# =========================
+# MAIN BOT
+# =========================
 with sync_playwright() as p:
-    browser = p.chromium.launch(headless=True)
+    browser = p.chromium.launch(headless=False)  # True for GitHub
     page = browser.new_page()
 
     print("🔥 MEGA SNIPER STARTED")
 
-    # ~5 hours
-    for _ in range(1800):
+    for _ in range(1800):  # ~5 hours
         try:
             # =====================
-            # 🟢 LZT
+            # 🟢 LZT CHECK
             # =====================
             page.goto(LZT_URL)
             page.wait_for_selector('[id^="marketItem--"]')
@@ -85,13 +95,14 @@ with sync_playwright() as p:
                     if item_id in seen:
                         continue
 
+                    title = item.inner_text().split("\n")[0].strip()
+
                     price_el = item.query_selector(".price")
                     if not price_el:
                         continue
 
                     price = float(price_el.inner_text().replace("$", "").strip())
 
-                    title = item.inner_text().split("\n")[0]
                     link = f"https://lzt.market/{item_id}"
 
                     seen.add(item_id)
@@ -99,50 +110,53 @@ with sync_playwright() as p:
 
                     send("🟢 NEW LZT LISTING", title, price, link, ping=False)
 
-                except:
-                    continue
+                    print("LZT:", title)
+
+                except Exception as e:
+                    print("LZT error:", e)
 
             # =====================
-            # 🔴 ELDORADO
+            # 🔴 ELDORADO CHECK (CLEAN)
             # =====================
             page.goto(ELDO_URL)
             page.wait_for_timeout(5000)
 
-            html = page.content()
+            cards = page.query_selector_all('a[href*="steam-accounts"]')
 
             current_ids = set()
 
-            blocks = html.split('href="/')
-
-            for block in blocks:
-                if "steam-accounts" not in block:
-                    continue
-
+            for card in cards:
                 try:
-                    link_part = block.split('"')[0]
-                    link = "https://www.eldorado.gg/" + link_part
+                    link = card.get_attribute("href")
+                    if not link:
+                        continue
 
+                    link = "https://www.eldorado.gg" + link
                     item_id = link
                     current_ids.add(item_id)
 
-                    title = block.split(">")[1][:60]
+                    text = card.inner_text().strip().replace("\n", " ")
 
-                    if "$" not in block:
+                    if "$" not in text:
                         continue
 
-                    price_text = block.split("$")[1].split("<")[0]
-                    price = float(price_text)
+                    # extract price safely
+                    price_part = text.split("$")[1].split(" ")[0]
+                    price = float(price_part)
 
-                    # NEW
+                    title = text.split("$")[0][:60].strip()
+
+                    # 🟢 NEW
                     if item_id not in seen:
                         seen.add(item_id)
                         prices[item_id] = price
                         save()
 
                         send("🔥 NEW ELDORADO LISTING", title, price, link, ping=True)
+                        print("ELDO NEW:", title)
                         continue
 
-                    # PRICE CHANGE
+                    # 🔥 PRICE CHANGE
                     old_price = prices.get(item_id)
 
                     if old_price and price != old_price:
@@ -150,11 +164,12 @@ with sync_playwright() as p:
                         save()
 
                         send("🔥 PRICE CHANGED", title, price, link, ping=True)
+                        print("PRICE CHANGE:", title)
 
-                except:
-                    continue
+                except Exception as e:
+                    print("ELDO error:", e)
 
-            # REMOVED
+            # ❌ REMOVED
             removed = set(prices.keys()) - current_ids
 
             for item_id in removed:
@@ -165,13 +180,15 @@ with sync_playwright() as p:
                 prices.pop(item_id, None)
                 seen.discard(item_id)
 
+                print("REMOVED:", item_id)
+
             save()
 
             print("✅ cycle done")
             time.sleep(10)
 
         except Exception as e:
-            print("ERROR:", e)
+            print("MAIN LOOP ERROR:", e)
             time.sleep(5)
 
     browser.close()

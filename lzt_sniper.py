@@ -4,31 +4,29 @@ import time
 import os
 import json
 
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL") or "YOUR_WEBHOOK_HERE"
 
-URL = "https://lzt.market/telegram/?order_by=pdate_to_down"
+URL = "https://lzt.market/steam/gorilla-tag/?limit=yes&rt=nomatter&order_by=price_to_up"
 
-# 🔁 Load seen items from file
+# 🔁 load seen items
 try:
     with open("seen.json", "r") as f:
         seen = set(json.load(f))
 except:
     seen = set()
 
-
 def save_seen():
     with open("seen.json", "w") as f:
         json.dump(list(seen), f)
 
-
 def send_webhook(title, price, link):
     data = {
-        "content": "",
+        "content": "",  # change to "@everyone" if you want
         "embeds": [
             {
                 "title": title,
-                "description": f"💰 {price}\n🔗 {link}",
-                "color": 3447003
+                "description": f"💰 ${price}\n🔗 {link}",
+                "color": 5814783
             }
         ]
     }
@@ -37,11 +35,13 @@ def send_webhook(title, price, link):
     except:
         print("Webhook failed")
 
-
 def restart():
     try:
         token = os.getenv("GH_TOKEN")
         repo = os.getenv("GITHUB_REPOSITORY")
+
+        if not token or not repo:
+            return
 
         url = f"https://api.github.com/repos/{repo}/actions/workflows/bot.yml/dispatches"
 
@@ -52,18 +52,19 @@ def restart():
 
         requests.post(url, headers=headers, json={"ref": "main"})
         print("♻️ Restart triggered")
+
     except Exception as e:
         print("Restart error:", e)
 
 
 with sync_playwright() as p:
-    browser = p.chromium.launch(headless=True)
+    browser = p.chromium.launch(headless=True)  # False if running on PC
     page = browser.new_page()
 
     page.goto(URL)
-    print("🔥 Sniper started...")
+    print("🔥 Gorilla Tag sniper started...")
 
-    # ⏱️ ~5 hours runtime (1800 × 10 sec)
+    # ⏱️ ~5 hours runtime
     for _ in range(1800):
         try:
             print("🔄 Refreshing...")
@@ -85,10 +86,19 @@ with sync_playwright() as p:
                     if item_id in seen:
                         continue
 
+                    # 🏷️ title
                     title = item.inner_text().strip().split("\n")[0]
 
+                    # 💰 price
                     price_el = item.query_selector(".price")
-                    price = price_el.inner_text() if price_el else "No price"
+                    if not price_el:
+                        continue
+
+                    price = float(price_el.inner_text().replace("$", "").strip())
+
+                    # 🔥 FILTER (CHANGE THIS)
+                    if price > 5:
+                        continue
 
                     link = f"https://lzt.market/{item_id}"
 
@@ -96,7 +106,8 @@ with sync_playwright() as p:
                     save_seen()
 
                     send_webhook(title, price, link)
-                    print(f"🚀 SENT: {title}")
+
+                    print(f"🔥 FOUND: {title} - ${price}")
 
                 except Exception as e:
                     print("Item error:", e)
@@ -109,5 +120,5 @@ with sync_playwright() as p:
 
     browser.close()
 
-# 🔁 Restart workflow after finishing
+# 🔁 restart GitHub workflow
 restart()
